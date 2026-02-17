@@ -8,6 +8,7 @@
  *   /vins:sync    - Force sync current session
  *   /vins:status  - Show connection and sync status
  *   /vins:pair    - Initiate device pairing with gateway
+ *   /vins:watch   - Enable/disable active watch for current session
  *
  * Environment:
  *   OPENCLAW_GATEWAY_URL      - WebSocket URL (default: wss://rpi-4b.tail8711b.ts.net)
@@ -26,6 +27,7 @@ const GATEWAY_PASSWORD = process.env.OPENCLAW_GATEWAY_PASSWORD || "";
 const SYNC_DEBOUNCE_MS = 2000;
 const RECONNECT_DELAY_MS = 5000;
 const CONNECT_TIMEOUT_MS = 10000;
+const FETCH_LIMIT = 3;
 
 // Storage paths
 const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", "vins-bridge");
@@ -40,6 +42,7 @@ const PROTOCOL_VERSION = 3;
 // ============================================
 
 type ConnectionState = "disconnected" | "connecting" | "connected" | "pairing_required" | "pairing" | "error";
+type AgentState = "running" | "done" | "blocked" | "failed";
 
 interface DeviceIdentity {
   version: 1;
@@ -67,6 +70,22 @@ interface GatewayFrame {
   event?: string;
 }
 
+interface WatchStatePayload {
+  enabled?: boolean;
+}
+
+interface WatchLocalState {
+  enabled: boolean;
+  sessionId: string | null;
+}
+
+interface QueuedMessage {
+  id: string;
+  message: string;
+  correlationId?: string | null;
+  enqueuedAt: string;
+}
+
 interface BridgeState {
   connectionState: ConnectionState;
   lastError: string | null;
@@ -75,6 +94,7 @@ interface BridgeState {
   sessionId: string | null;
   projectPath: string;
   syncPending: boolean;
+  watchState: WatchLocalState;
 }
 
 function shortDeviceId(deviceId: string): string {
@@ -228,6 +248,7 @@ export default function (pi: ExtensionAPI) {
   let syncTimer: ReturnType<typeof setTimeout> | null = null;
   let requestId = 0;
   let currentCtx: ExtensionContext | null = null;
+  let pendingSyncState: AgentState | undefined;
 
   const pendingRequests = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
@@ -239,7 +260,62 @@ export default function (pi: ExtensionAPI) {
     sessionId: null,
     projectPath: process.cwd(),
     syncPending: false,
+    watchState: {
+      enabled: false,
+      sessionId: null,
+    },
   };
+
+  async function refreshWatchState(sessionId: string): Promise<void> {
+    if (state.connectionState !== "connected") return;
+    try {
+      const payload = (await sendRequest("pi.session.watch.get", { sessionId })) as WatchStatePayload;
+      state.watchState = {
+        enabled: Boolean(payload?.enabled),
+        sessionId,
+      };
+    } catch {
+      // Keep local state unchanged on transient errors
+    }
+  }
+
+  async function fetchAndInjectMessages(sessionId: string): Promise<number> {
+    if (state.connectionState !== "connected") return 0;
+
+    const payload = (await sendRequest("pi.session.messages.fetch", {
+      sessionId,
+      limit: FETCH_LIMIT,
+    })) as { messages?: QueuedMessage[] };
+
+    const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+    if (messages.length === 0) return 0;
+
+    for (const msg of messages) {
+      pi.sendUserMessage(msg.message, { deliverAs: "followUp" });
+    }
+
+    await sendRequest("pi.session.messages.ack", {
+      sessionId,
+      ids: messages.map((m) => m.id),
+    });
+
+    return messages.length;
+  }
+
+  async function maybeFetchQueuedMessages(reason: string): Promise<void> {
+    if (!state.watchState.enabled || !state.sessionId || !currentCtx) return;
+    const sessionId = getSessionId(currentCtx);
+    if (state.watchState.sessionId && state.watchState.sessionId !== sessionId) return;
+
+    try {
+      const fetched = await fetchAndInjectMessages(sessionId);
+      if (fetched > 0) {
+        currentCtx.ui.notify(`VINS_WATCH | delivered ${fetched} queued follow-up message(s) | ${reason}`, "info");
+      }
+    } catch {
+      // Non-fatal; event-driven retries happen on next enqueue/reconnect/agent_end
+    }
+  }
 
   // ============================================
   // State Machine
@@ -255,6 +331,7 @@ export default function (pi: ExtensionAPI) {
       switch (newState) {
         case "connected":
           currentCtx.ui.notify("Vins: connected", "success");
+          void maybeFetchQueuedMessages("reconnect");
           break;
         case "pairing_required":
           currentCtx.ui.notify("Vins: pairing required, run /vins:pair", "warning");
@@ -480,6 +557,14 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
+    if (frame.type === "event" && frame.event === "pi.session.message.queued") {
+      const payload = frame.payload as { sessionId?: string } | undefined;
+      if (!payload?.sessionId || !state.sessionId) return;
+      if (payload.sessionId !== state.sessionId) return;
+      void maybeFetchQueuedMessages("queued-event");
+      return;
+    }
+
     // Connect response
     if (frame.type === "res" && frame.id === "connect-1") {
       clearConnectTimeout();
@@ -500,7 +585,8 @@ export default function (pi: ExtensionAPI) {
         // Process pending sync
         if (state.syncPending) {
           state.syncPending = false;
-          doSync();
+          void doSync(pendingSyncState);
+          pendingSyncState = undefined;
         }
       } else {
         const errorMsg = frame.error?.message || "Auth failed";
@@ -571,52 +657,59 @@ export default function (pi: ExtensionAPI) {
     return `ephemeral-${Date.now()}`;
   }
 
-  function scheduleSync(ctx: ExtensionContext): void {
+  function scheduleSync(ctx: ExtensionContext, agentState?: AgentState): void {
     currentCtx = ctx;
 
     if (syncTimer) clearTimeout(syncTimer);
+    pendingSyncState = agentState ?? pendingSyncState;
 
     syncTimer = setTimeout(() => {
-      doSync();
+      const syncState = pendingSyncState;
+      pendingSyncState = undefined;
+      void doSync(syncState);
     }, SYNC_DEBOUNCE_MS);
   }
 
-  function doSync(): void {
-    if (!currentCtx) return;
+  async function doSync(agentState?: AgentState): Promise<void> {
+    try {
+      if (!currentCtx) return;
 
-    if (state.connectionState !== "connected") {
-      state.syncPending = true;
-      if (state.connectionState === "disconnected") {
-        connect();
+      if (state.connectionState !== "connected") {
+        state.syncPending = true;
+        pendingSyncState = agentState ?? pendingSyncState;
+        if (state.connectionState === "disconnected") {
+          connect();
+        }
+        return;
       }
-      return;
-    }
 
-    const ctx = currentCtx;
-    const entries = ctx.sessionManager.getEntries();
-    const sessionId = getSessionId(ctx);
+      const ctx = currentCtx;
+      const entries = ctx.sessionManager.getEntries();
+      const sessionId = getSessionId(ctx);
 
-    if (state.sessionId !== sessionId) {
-      state.sessionId = sessionId;
-      state.lastSyncedIndex = 0;
-    }
+      if (state.sessionId !== sessionId) {
+        state.sessionId = sessionId;
+        state.lastSyncedIndex = 0;
+      }
 
-    const newEntries = entries.slice(state.lastSyncedIndex);
-    if (newEntries.length === 0) return;
+      const newEntries = entries.slice(state.lastSyncedIndex);
+      if (newEntries.length === 0) return;
 
-    sendRequest("pi.session.sync", {
-      sessionId,
-      projectPath: state.projectPath,
-      entries: newEntries,
-      append: state.lastSyncedIndex > 0,
-    })
-      .then(() => {
-        state.lastSyncedIndex = entries.length;
-        state.lastSyncAt = Date.now();
-      })
-      .catch(() => {
-        // Sync failed, will retry on next trigger
+      await sendRequest("pi.session.sync", {
+        sessionId,
+        projectPath: state.projectPath,
+        entries: newEntries,
+        append: state.lastSyncedIndex > 0,
+        agentState,
       });
+
+      state.lastSyncedIndex = entries.length;
+      state.lastSyncAt = Date.now();
+
+      await maybeFetchQueuedMessages("post-sync");
+    } catch {
+      // swallow errors to keep sync/watch loop stable (non-fatal retry path)
+    }
   }
 
   // ============================================
@@ -628,14 +721,28 @@ export default function (pi: ExtensionAPI) {
     state.sessionId = getSessionId(ctx);
     state.lastSyncedIndex = 0;
 
+    if (state.watchState.sessionId !== state.sessionId) {
+      state.watchState = { enabled: false, sessionId: state.sessionId };
+    }
+
     if (isConfigured() && state.connectionState === "disconnected") {
       connect();
+    }
+
+    if (state.connectionState === "connected" && state.sessionId) {
+      void refreshWatchState(state.sessionId).then(() => maybeFetchQueuedMessages("session-start"));
+    }
+  });
+
+  pi.on("agent_start", (_event, ctx) => {
+    if (isConfigured()) {
+      scheduleSync(ctx, "running");
     }
   });
 
   pi.on("agent_end", (_event, ctx) => {
     if (isConfigured()) {
-      scheduleSync(ctx);
+      scheduleSync(ctx, "done");
     }
   });
 
@@ -646,6 +753,10 @@ export default function (pi: ExtensionAPI) {
 
     if (isConfigured()) {
       scheduleSync(ctx);
+    }
+
+    if (state.connectionState === "connected" && state.sessionId) {
+      void refreshWatchState(state.sessionId);
     }
   });
 
@@ -693,9 +804,53 @@ export default function (pi: ExtensionAPI) {
 
       currentCtx = ctx;
       state.lastSyncedIndex = 0;
-      doSync();
+      void doSync();
 
       ctx.ui.notify("SYNC | triggered", "info");
+    },
+  });
+
+  pi.registerCommand("vins:watch", {
+    description: "Manage active watch for current Pi session: on | off | status",
+    handler: async (args, ctx) => {
+      const action = (args[0] || "status").toLowerCase();
+      const sessionId = getSessionId(ctx);
+      currentCtx = ctx;
+
+      if (!isConfigured()) {
+        ctx.ui.notify("PAIRING_REQUIRED | run /vins:pair", "warning");
+        return;
+      }
+
+      if (state.connectionState !== "connected") {
+        connect();
+        ctx.ui.notify("VINS_WATCH | connecting to gateway", "warning");
+        return;
+      }
+
+      if (action === "status") {
+        await refreshWatchState(sessionId);
+        ctx.ui.notify(
+          `VINS_WATCH | ${state.watchState.enabled ? "ON" : "OFF"} | session ${sessionId}`,
+          "info",
+        );
+        return;
+      }
+
+      if (action !== "on" && action !== "off") {
+        ctx.ui.notify("Usage: /vins:watch on|off|status", "warning");
+        return;
+      }
+
+      const enabled = action === "on";
+      await sendRequest("pi.session.watch.set", { sessionId, enabled });
+      state.watchState = { enabled, sessionId };
+
+      if (enabled) {
+        await maybeFetchQueuedMessages("watch-enabled");
+      }
+
+      ctx.ui.notify(`VINS_WATCH | ${enabled ? "ON" : "OFF"} | session ${sessionId}`, "success");
     },
   });
 
@@ -738,9 +893,12 @@ export default function (pi: ExtensionAPI) {
           break;
       }
 
-      const parts = [stateName, details, hints].filter(Boolean);
+      const watch = state.watchState.sessionId
+        ? `watch ${state.watchState.enabled ? "ON" : "OFF"} (${state.watchState.sessionId})`
+        : "watch OFF";
+
+      const parts = [stateName, details, watch, hints].filter(Boolean);
       ctx.ui.notify(parts.join(" | "), state.connectionState === "error" ? "error" : "info");
     },
   });
-
 }
