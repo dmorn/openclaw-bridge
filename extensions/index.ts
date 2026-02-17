@@ -33,6 +33,7 @@ const FETCH_LIMIT = 3;
 const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", "vins-bridge");
 const IDENTITY_FILE = path.join(CONFIG_DIR, "device-identity.json");
 const TOKEN_FILE = path.join(CONFIG_DIR, "device-token.json");
+const PREFERENCES_FILE = path.join(CONFIG_DIR, "preferences.json");
 
 // Protocol version
 const PROTOCOL_VERSION = 3;
@@ -72,6 +73,10 @@ interface GatewayFrame {
 
 interface WatchStatePayload {
   enabled?: boolean;
+}
+
+interface Preferences {
+  watchAlways: boolean;
 }
 
 interface WatchLocalState {
@@ -203,6 +208,23 @@ function clearDeviceToken(): void {
   }
 }
 
+function loadPreferences(): Preferences {
+  try {
+    if (fs.existsSync(PREFERENCES_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(PREFERENCES_FILE, "utf8")) as { watchAlways?: unknown };
+      return { watchAlways: raw.watchAlways === true };
+    }
+  } catch {
+    // Ignore invalid preferences and use defaults
+  }
+  return { watchAlways: false };
+}
+
+function savePreferences(preferences: Preferences): void {
+  ensureDir(PREFERENCES_FILE);
+  fs.writeFileSync(PREFERENCES_FILE, JSON.stringify(preferences, null, 2) + "\n", { mode: 0o600 });
+}
+
 // ============================================
 // Device Auth
 // ============================================
@@ -240,6 +262,7 @@ function publicKeyToBase64Url(publicKeyPem: string): string {
 
 export default function (pi: ExtensionAPI) {
   const identity = loadOrCreateDeviceIdentity();
+  const preferences = loadPreferences();
 
   let ws: WebSocket | null = null;
   let connectNonce: string | null = null;
@@ -249,6 +272,8 @@ export default function (pi: ExtensionAPI) {
   let requestId = 0;
   let currentCtx: ExtensionContext | null = null;
   let pendingSyncState: AgentState | undefined;
+  let pendingAutoWatchEnable = false;
+  let autoWatchInitializedSessionId: string | null = null;
 
   const pendingRequests = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
@@ -331,6 +356,9 @@ export default function (pi: ExtensionAPI) {
       switch (newState) {
         case "connected":
           currentCtx.ui.notify("Vins: connected", "success");
+          if (pendingAutoWatchEnable && currentCtx) {
+            void maybeApplyAutoWatch(currentCtx, "post-connect");
+          }
           void maybeFetchQueuedMessages("reconnect");
           break;
         case "pairing_required":
@@ -657,6 +685,40 @@ export default function (pi: ExtensionAPI) {
     return `ephemeral-${Date.now()}`;
   }
 
+  function getProjectPath(ctx: ExtensionContext): string {
+    const sessionFile = ctx.sessionManager.getSessionFile();
+    if (sessionFile) {
+      return path.dirname(sessionFile);
+    }
+    return process.cwd();
+  }
+
+  async function setWatchEnabled(sessionId: string, enabled: boolean, projectPath: string): Promise<void> {
+    await sendRequest("pi.session.watch.set", { sessionId, enabled, projectPath });
+    state.watchState = { enabled, sessionId };
+  }
+
+  async function maybeApplyAutoWatch(ctx: ExtensionContext, reason: string): Promise<void> {
+    const sessionId = getSessionId(ctx);
+    if (!preferences.watchAlways || autoWatchInitializedSessionId === sessionId) return;
+
+    if (state.connectionState !== "connected") {
+      pendingAutoWatchEnable = true;
+      if (state.connectionState === "disconnected") connect();
+      return;
+    }
+
+    try {
+      await setWatchEnabled(sessionId, true, getProjectPath(ctx));
+      autoWatchInitializedSessionId = sessionId;
+      pendingAutoWatchEnable = false;
+      ctx.ui.notify(`VINS_WATCH | ALWAYS ON | auto-enabled (${reason}) | session ${sessionId}`, "info");
+      await maybeFetchQueuedMessages("watch-auto-enabled");
+    } catch {
+      pendingAutoWatchEnable = true;
+    }
+  }
+
   function scheduleSync(ctx: ExtensionContext, agentState?: AgentState): void {
     currentCtx = ctx;
 
@@ -719,6 +781,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     currentCtx = ctx;
     state.sessionId = getSessionId(ctx);
+    state.projectPath = getProjectPath(ctx);
     state.lastSyncedIndex = 0;
 
     if (state.watchState.sessionId !== state.sessionId) {
@@ -729,12 +792,16 @@ export default function (pi: ExtensionAPI) {
       connect();
     }
 
+    void maybeApplyAutoWatch(ctx, "session_start");
+
     if (state.connectionState === "connected" && state.sessionId) {
       void refreshWatchState(state.sessionId).then(() => maybeFetchQueuedMessages("session-start"));
     }
   });
 
   pi.on("agent_start", (_event, ctx) => {
+    state.projectPath = getProjectPath(ctx);
+    void maybeApplyAutoWatch(ctx, "agent_start");
     if (isConfigured()) {
       scheduleSync(ctx, "running");
     }
@@ -749,7 +816,11 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_switch", (_event, ctx) => {
     currentCtx = ctx;
     state.sessionId = getSessionId(ctx);
+    state.projectPath = getProjectPath(ctx);
+    autoWatchInitializedSessionId = null;
     state.lastSyncedIndex = 0;
+
+    void maybeApplyAutoWatch(ctx, "session_switch");
 
     if (isConfigured()) {
       scheduleSync(ctx);
@@ -811,14 +882,66 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("vins:watch", {
-    description: "Manage active watch for current Pi session: on | off | status",
+    description: "Manage active watch for current Pi session: on | off | always | never | status",
     handler: async (args, ctx) => {
-      const action = (typeof args === "string" ? args.trim().split(/\s+/)[0] || "status" : args[0] || "status").toLowerCase();
+      const tokens = (typeof args === "string" ? args.trim().split(/\s+/).filter(Boolean) : []) as string[];
+      const action = (tokens[0] || "status").toLowerCase();
       const sessionId = getSessionId(ctx);
+      const projectPath = getProjectPath(ctx);
       currentCtx = ctx;
 
       if (!isConfigured()) {
         ctx.ui.notify("PAIRING_REQUIRED | run /vins:pair", "warning");
+        return;
+      }
+
+      if (action === "status") {
+        if (state.connectionState === "connected") {
+          await refreshWatchState(sessionId);
+        }
+        ctx.ui.notify(
+          `VINS_WATCH | always ${preferences.watchAlways ? "ON" : "OFF"} | session ${state.watchState.enabled ? "ON" : "OFF"} | ${sessionId}`,
+          "info",
+        );
+        return;
+      }
+
+      if (!["on", "off", "always", "never"].includes(action)) {
+        ctx.ui.notify("Usage: /vins:watch on|off|always|never|status", "warning");
+        return;
+      }
+
+      if (action === "always") {
+        preferences.watchAlways = true;
+        savePreferences(preferences);
+
+        if (state.connectionState !== "connected") {
+          pendingAutoWatchEnable = true;
+          connect();
+          ctx.ui.notify("VINS_WATCH | ALWAYS ON | preference saved, will enable after connect", "success");
+          return;
+        }
+
+        await setWatchEnabled(sessionId, true, projectPath);
+        autoWatchInitializedSessionId = sessionId;
+        await maybeFetchQueuedMessages("watch-always-enabled");
+        ctx.ui.notify(`VINS_WATCH | ALWAYS ON | session ON | ${sessionId}`, "success");
+        return;
+      }
+
+      if (action === "never") {
+        preferences.watchAlways = false;
+        savePreferences(preferences);
+        pendingAutoWatchEnable = false;
+
+        if (state.connectionState !== "connected") {
+          state.watchState = { enabled: false, sessionId };
+          ctx.ui.notify(`VINS_WATCH | ALWAYS OFF | session OFF | ${sessionId}`, "success");
+          return;
+        }
+
+        await setWatchEnabled(sessionId, false, projectPath);
+        ctx.ui.notify(`VINS_WATCH | ALWAYS OFF | session OFF | ${sessionId}`, "success");
         return;
       }
 
@@ -828,29 +951,17 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (action === "status") {
-        await refreshWatchState(sessionId);
-        ctx.ui.notify(
-          `VINS_WATCH | ${state.watchState.enabled ? "ON" : "OFF"} | session ${sessionId}`,
-          "info",
-        );
-        return;
-      }
-
-      if (action !== "on" && action !== "off") {
-        ctx.ui.notify("Usage: /vins:watch on|off|status", "warning");
-        return;
-      }
-
       const enabled = action === "on";
-      await sendRequest("pi.session.watch.set", { sessionId, enabled });
-      state.watchState = { enabled, sessionId };
+      await setWatchEnabled(sessionId, enabled, projectPath);
 
       if (enabled) {
         await maybeFetchQueuedMessages("watch-enabled");
       }
 
-      ctx.ui.notify(`VINS_WATCH | ${enabled ? "ON" : "OFF"} | session ${sessionId}`, "success");
+      ctx.ui.notify(
+        `VINS_WATCH | always ${preferences.watchAlways ? "ON" : "OFF"} | session ${enabled ? "ON" : "OFF"} | ${sessionId}`,
+        "success",
+      );
     },
   });
 
