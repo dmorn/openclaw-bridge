@@ -702,7 +702,6 @@ export default function (pi: ExtensionAPI) {
     const sessionId = getSessionId(ctx);
     if (!preferences.watchAlways || autoWatchInitializedSessionId === sessionId) return;
 
-    autoWatchInitializedSessionId = sessionId;
     if (state.connectionState !== "connected") {
       pendingAutoWatchEnable = true;
       if (state.connectionState === "disconnected") connect();
@@ -711,6 +710,7 @@ export default function (pi: ExtensionAPI) {
 
     try {
       await setWatchEnabled(sessionId, true, getProjectPath(ctx));
+      autoWatchInitializedSessionId = sessionId;
       pendingAutoWatchEnable = false;
       ctx.ui.notify(`VINS_WATCH | ALWAYS ON | auto-enabled (${reason}) | session ${sessionId}`, "info");
       await maybeFetchQueuedMessages("watch-auto-enabled");
