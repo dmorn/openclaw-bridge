@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/danielmorandini/vins-bridge.git"
+    "url": "git+https://github.com/dmorn/vins-bridge.git"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*"
