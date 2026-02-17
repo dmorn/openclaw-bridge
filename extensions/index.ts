@@ -813,7 +813,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("vins:watch", {
     description: "Manage active watch for current Pi session: on | off | status",
     handler: async (args, ctx) => {
-      const action = (args[0] || "status").toLowerCase();
+      const action = (typeof args === "string" ? args.trim().split(/\s+/)[0] || "status" : args[0] || "status").toLowerCase();
       const sessionId = getSessionId(ctx);
       currentCtx = ctx;
 
