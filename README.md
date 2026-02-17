@@ -1,22 +1,73 @@
-# vins-bridge
+# Vins Bridge - Pi ↔ OpenClaw Session Sync
 
-Pi extension to sync coding sessions to an OpenClaw gateway.
+Sync your Pi coding sessions to OpenClaw for cross-context awareness.
+
+## Features
+
+- **Session mirroring** — Pi sessions are synced to OpenClaw workspace
+- **Secure device pairing** — Ed25519 keypair with gateway approval
+- **Gateway RPC extension** — OpenClaw is extended with custom `pi.session.*` methods
+- **On-demand access** — Zero tokens during sync, Vins reads when needed
+- **Auto-sync** — Syncs after each agent turn (debounced 2s)
 
 ## Installation
 
 ```bash
-pi install git:github.com/danielmorandini/vins-bridge
+# Install from local path
+pi install ./pi-extension
+
+# Or copy to extensions directory
+cp -r ./pi-extension ~/.pi/agent/extensions/vins-bridge
 ```
 
-Or for a specific version:
+## OpenClaw Side (Required)
+
+This project follows a **2-repo architecture**:
+
+1. Pi extension (this repo: `pi-extension/`) running inside Pi coding agent
+2. OpenClaw plugin (separate repo): `https://github.com/dmorn/vins-bridge-openclaw-plugin` (private)
+
+The OpenClaw plugin must be installed separately in the OpenClaw environment.
+
+### OpenClaw plugin methods
+
+The OpenClaw plugin registers these custom gateway methods:
+
+- `pi.session.sync` — append/write session entries to JSONL
+- `pi.session.list` — list synced Pi sessions
+- `pi.session.get` — read session entries with pagination (`offset`, `limit`)
+- `pi.session.delete` — delete a synced session
+
+### Install OpenClaw plugin
 
 ```bash
-pi install git:github.com/danielmorandini/vins-bridge@v1.0.0
+openclaw plugins install /path/to/vins-bridge-openclaw-plugin
 ```
 
-## Configuration
+### OpenClaw plugin config
 
-Set the gateway URL via environment variable:
+In `openclaw.json`:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "pi-bridge": {
+        "enabled": true,
+        "config": {
+          "sessionsDir": "pi-sessions"
+        }
+      }
+    }
+  }
+}
+```
+
+`sessionsDir` is resolved relative to `agents.defaults.workspace`.
+
+## Setup
+
+### 1. Set Gateway URL (optional if using default)
 
 ```bash
 export OPENCLAW_GATEWAY_URL="wss://your-gateway.example.com"
@@ -24,33 +75,108 @@ export OPENCLAW_GATEWAY_URL="wss://your-gateway.example.com"
 
 Default: `wss://rpi-4b.tail8711b.ts.net`
 
+### 2. Set Gateway Password (optional if using device token)
+
+```bash
+export OPENCLAW_GATEWAY_PASSWORD="your-password"
+```
+
+### 3. Pair the Device
+
+Start Pi and run:
+
+```
+/vins:pair
+```
+
+This generates an Ed25519 keypair and sends a pairing request to the gateway.
+
+### 4. Approve on Gateway
+
+On your OpenClaw gateway host:
+
+```bash
+# List pending pairing requests
+openclaw devices list
+
+# Approve the request
+openclaw devices approve <requestId>
+```
+
+After approval, the device receives a token that's stored locally. Future
+connections use this token automatically.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/vins:pair` | Initiate device pairing with the gateway |
+| `/vins:pair` | Initiate device pairing with gateway |
 | `/vins:sync` | Force sync current session |
 | `/vins:status` | Show connection and sync status |
 
-## Pairing Flow
-
-1. Run `/vins:pair` in Pi
-2. On the gateway, run `openclaw devices list` to see pending requests
-3. Approve with `openclaw devices approve <requestId>`
-4. Run `/vins:pair` again to connect
-
 ## How It Works
 
-- Uses Ed25519 device identity for secure authentication
-- Sessions sync automatically after each agent turn
-- Device token persisted locally after first pairing
+```
+Pi (silver)                    OpenClaw (rpi-4b)
+    │                               │
+    │── connect.challenge ──────────│
+    │                               │
+    │── connect (device identity) ──│
+    │                               │
+    │◄─ hello-ok (device token) ────│
+    │                               │
+    │── pi.session.sync ────────────│
+    │                               │
+    └───────────────────────────────┘
+```
 
-## Files
+1. **Connect** — Pi sends Ed25519-signed device identity
+2. **Auth** — Gateway verifies signature and checks pairing
+3. **Token** — Gateway issues device-scoped token
+4. **Sync** — Pi pushes session deltas via RPC (no agent invocation)
 
-Device identity and tokens are stored in:
-- `~/.pi/agent/extensions/vins-bridge/device-identity.json`
-- `~/.pi/agent/extensions/vins-bridge/device-token.json`
+## Storage
 
-## License
+Pi side:
 
-MIT
+```
+~/.pi/agent/extensions/vins-bridge/
+├── device-identity.json   # Ed25519 keypair (chmod 600)
+└── device-token.json      # Gateway-issued token (chmod 600)
+```
+
+OpenClaw side (default):
+
+```
+<workspace>/pi-sessions/
+├── <sessionId>.jsonl      # synced entries
+└── <sessionId>.meta.json  # session metadata
+```
+
+## Security
+
+- Device identity uses Ed25519 (same as OpenClaw native clients)
+- Private key never leaves the device
+- Device tokens are scoped to role + permissions
+- Gateway admin can revoke tokens at any time
+
+## Troubleshooting
+
+**"NOT_PAIRED" error**
+
+Run `/vins:pair` and approve on gateway with `openclaw devices approve`.
+
+**"Connection timeout"**
+
+Check gateway URL and network connectivity:
+```bash
+curl -I https://your-gateway.example.com
+```
+
+**Token expired/revoked**
+
+Clear stored token and re-pair:
+```bash
+rm ~/.pi/agent/extensions/vins-bridge/device-token.json
+pi /vins:pair
+```
