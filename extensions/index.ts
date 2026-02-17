@@ -671,41 +671,45 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function doSync(agentState?: AgentState): Promise<void> {
-    if (!currentCtx) return;
+    try {
+      if (!currentCtx) return;
 
-    if (state.connectionState !== "connected") {
-      state.syncPending = true;
-      pendingSyncState = agentState ?? pendingSyncState;
-      if (state.connectionState === "disconnected") {
-        connect();
+      if (state.connectionState !== "connected") {
+        state.syncPending = true;
+        pendingSyncState = agentState ?? pendingSyncState;
+        if (state.connectionState === "disconnected") {
+          connect();
+        }
+        return;
       }
-      return;
+
+      const ctx = currentCtx;
+      const entries = ctx.sessionManager.getEntries();
+      const sessionId = getSessionId(ctx);
+
+      if (state.sessionId !== sessionId) {
+        state.sessionId = sessionId;
+        state.lastSyncedIndex = 0;
+      }
+
+      const newEntries = entries.slice(state.lastSyncedIndex);
+      if (newEntries.length === 0) return;
+
+      await sendRequest("pi.session.sync", {
+        sessionId,
+        projectPath: state.projectPath,
+        entries: newEntries,
+        append: state.lastSyncedIndex > 0,
+        agentState,
+      });
+
+      state.lastSyncedIndex = entries.length;
+      state.lastSyncAt = Date.now();
+
+      await maybeFetchQueuedMessages("post-sync");
+    } catch {
+      // swallow errors to keep sync/watch loop stable (non-fatal retry path)
     }
-
-    const ctx = currentCtx;
-    const entries = ctx.sessionManager.getEntries();
-    const sessionId = getSessionId(ctx);
-
-    if (state.sessionId !== sessionId) {
-      state.sessionId = sessionId;
-      state.lastSyncedIndex = 0;
-    }
-
-    const newEntries = entries.slice(state.lastSyncedIndex);
-    if (newEntries.length === 0) return;
-
-    await sendRequest("pi.session.sync", {
-      sessionId,
-      projectPath: state.projectPath,
-      entries: newEntries,
-      append: state.lastSyncedIndex > 0,
-      agentState,
-    });
-
-    state.lastSyncedIndex = entries.length;
-    state.lastSyncAt = Date.now();
-
-    await maybeFetchQueuedMessages("post-sync");
   }
 
   // ============================================
