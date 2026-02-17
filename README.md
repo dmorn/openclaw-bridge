@@ -6,9 +6,11 @@ Sync your Pi coding sessions to OpenClaw for cross-context awareness.
 
 - **Session mirroring** — Pi sessions are synced to OpenClaw workspace
 - **Secure device pairing** — Ed25519 keypair with gateway approval
+- **Active watch loop** — `/vins:watch on|off|status` controls server-side watch state per session
+- **Event-driven continuation delivery** — queued follow-up messages are fetched on enqueue events, reconnect, and post-sync
 - **Gateway RPC extension** — OpenClaw is extended with custom `pi.session.*` methods
 - **On-demand access** — Zero tokens during sync, Vins reads when needed
-- **Auto-sync** — Syncs after each agent turn (debounced 2s)
+- **Auto-sync** — Syncs on `agent_start`/`agent_end` (debounced 2s) and forwards `agentState`
 
 ## Installation
 
@@ -33,10 +35,13 @@ The OpenClaw plugin must be installed separately in the OpenClaw environment.
 
 The OpenClaw plugin registers these custom gateway methods:
 
-- `pi.session.sync` — append/write session entries to JSONL
+- `pi.session.sync` — append/write session entries to JSONL (accepts optional `agentState`)
 - `pi.session.list` — list synced Pi sessions
 - `pi.session.get` — read session entries with pagination (`offset`, `limit`)
 - `pi.session.delete` — delete a synced session
+- `pi.session.watch.set` / `pi.session.watch.get` — persist and inspect watch state
+- `pi.session.enqueue` — enqueue continuation messages for a Pi session
+- `pi.session.messages.fetch` / `pi.session.messages.ack` — fetch/ack continuation queue items
 
 ### Install OpenClaw plugin
 
@@ -112,7 +117,8 @@ connections use this token automatically.
 |---------|-------------|
 | `/vins:pair` | Initiate device pairing with gateway |
 | `/vins:sync` | Force sync current session |
-| `/vins:status` | Show connection and sync status |
+| `/vins:watch on\|off\|status` | Enable/disable/show active watch for current session |
+| `/vins:status` | Show connection, sync, and watch status |
 
 ## How It Works
 
