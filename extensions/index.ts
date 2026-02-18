@@ -27,7 +27,6 @@ const GATEWAY_PASSWORD = process.env.OPENCLAW_GATEWAY_PASSWORD || "";
 const SYNC_DEBOUNCE_MS = 2000;
 const RECONNECT_DELAY_MS = 5000;
 const CONNECT_TIMEOUT_MS = 10000;
-const FETCH_LIMIT = 3;
 
 // Storage paths
 const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", "vins-bridge");
@@ -82,13 +81,6 @@ interface Preferences {
 interface WatchLocalState {
   enabled: boolean;
   sessionId: string | null;
-}
-
-interface QueuedMessage {
-  id: string;
-  message: string;
-  correlationId?: string | null;
-  enqueuedAt: string;
 }
 
 interface BridgeState {
@@ -304,44 +296,6 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  async function fetchAndInjectMessages(sessionId: string): Promise<number> {
-    if (state.connectionState !== "connected") return 0;
-
-    const payload = (await sendRequest("pi.session.messages.fetch", {
-      sessionId,
-      limit: FETCH_LIMIT,
-    })) as { messages?: QueuedMessage[] };
-
-    const messages = Array.isArray(payload?.messages) ? payload.messages : [];
-    if (messages.length === 0) return 0;
-
-    for (const msg of messages) {
-      pi.sendUserMessage(msg.message, { deliverAs: "followUp" });
-    }
-
-    await sendRequest("pi.session.messages.ack", {
-      sessionId,
-      ids: messages.map((m) => m.id),
-    });
-
-    return messages.length;
-  }
-
-  async function maybeFetchQueuedMessages(reason: string): Promise<void> {
-    if (!state.watchState.enabled || !state.sessionId || !currentCtx) return;
-    const sessionId = getSessionId(currentCtx);
-    if (state.watchState.sessionId && state.watchState.sessionId !== sessionId) return;
-
-    try {
-      const fetched = await fetchAndInjectMessages(sessionId);
-      if (fetched > 0) {
-        currentCtx.ui.notify(`VINS_WATCH | delivered ${fetched} queued follow-up message(s) | ${reason}`, "info");
-      }
-    } catch {
-      // Non-fatal; event-driven retries happen on next enqueue/reconnect/agent_end
-    }
-  }
-
   // ============================================
   // State Machine
   // ============================================
@@ -359,7 +313,6 @@ export default function (pi: ExtensionAPI) {
           if (pendingAutoWatchEnable && currentCtx) {
             void maybeApplyAutoWatch(currentCtx, "post-connect");
           }
-          void maybeFetchQueuedMessages("reconnect");
           break;
         case "pairing_required":
           currentCtx.ui.notify("Vins: pairing required, run /vins:pair", "warning");
@@ -585,11 +538,30 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    if (frame.type === "event" && frame.event === "pi.session.message.queued") {
-      const payload = frame.payload as { sessionId?: string } | undefined;
-      if (!payload?.sessionId || !state.sessionId) return;
+    if (frame.type === "event" && frame.event === "pi.session.continuation") {
+      const payload = frame.payload as { sessionId?: string; message?: string; requestId?: string } | undefined;
+      if (!payload?.sessionId || !payload?.message || !payload?.requestId || !state.sessionId) return;
       if (payload.sessionId !== state.sessionId) return;
-      void maybeFetchQueuedMessages("queued-event");
+
+      void (async () => {
+        try {
+          pi.sendUserMessage(payload.message as string, { deliverAs: "followUp" });
+          await sendRequest("pi.session.continuation.ack", {
+            requestId: payload.requestId,
+            ok: true,
+          });
+        } catch (err) {
+          try {
+            await sendRequest("pi.session.continuation.ack", {
+              requestId: payload.requestId,
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          } catch {
+            // ignore ack failure
+          }
+        }
+      })();
       return;
     }
 
@@ -713,7 +685,6 @@ export default function (pi: ExtensionAPI) {
       autoWatchInitializedSessionId = sessionId;
       pendingAutoWatchEnable = false;
       ctx.ui.notify(`VINS_WATCH | ALWAYS ON | auto-enabled (${reason}) | session ${sessionId}`, "info");
-      await maybeFetchQueuedMessages("watch-auto-enabled");
     } catch {
       pendingAutoWatchEnable = true;
     }
@@ -768,7 +739,6 @@ export default function (pi: ExtensionAPI) {
       state.lastSyncedIndex = entries.length;
       state.lastSyncAt = Date.now();
 
-      await maybeFetchQueuedMessages("post-sync");
     } catch {
       // swallow errors to keep sync/watch loop stable (non-fatal retry path)
     }
@@ -795,7 +765,7 @@ export default function (pi: ExtensionAPI) {
     void maybeApplyAutoWatch(ctx, "session_start");
 
     if (state.connectionState === "connected" && state.sessionId) {
-      void refreshWatchState(state.sessionId).then(() => maybeFetchQueuedMessages("session-start"));
+      void refreshWatchState(state.sessionId);
     }
   });
 
@@ -924,7 +894,6 @@ export default function (pi: ExtensionAPI) {
 
         await setWatchEnabled(sessionId, true, projectPath);
         autoWatchInitializedSessionId = sessionId;
-        await maybeFetchQueuedMessages("watch-always-enabled");
         ctx.ui.notify(`VINS_WATCH | ALWAYS ON | session ON | ${sessionId}`, "success");
         return;
       }
@@ -955,7 +924,6 @@ export default function (pi: ExtensionAPI) {
       await setWatchEnabled(sessionId, enabled, projectPath);
 
       if (enabled) {
-        await maybeFetchQueuedMessages("watch-enabled");
       }
 
       ctx.ui.notify(
