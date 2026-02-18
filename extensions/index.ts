@@ -1,14 +1,14 @@
 /**
- * Vins Bridge Extension for Pi
+ * OpenClaw Bridge Extension for Pi
  *
- * Syncs Pi session entries to OpenClaw (Vins) for on-demand access.
+ * Syncs Pi session entries to OpenClaw for on-demand access.
  * Uses proper device identity and pairing for secure gateway access.
  *
  * Commands:
- *   /vins:sync    - Force sync current session
- *   /vins:status  - Show connection and sync status
- *   /vins:pair    - Initiate device pairing with gateway
- *   /vins:watch   - Enable/disable active watch for current session
+ *   /openclaw:sync    - Force sync current session
+ *   /openclaw:status  - Show connection and sync status
+ *   /openclaw:pair    - Initiate device pairing with gateway
+ *   /openclaw:watch   - Enable/disable active watch for current session
  *
  * Environment:
  *   OPENCLAW_GATEWAY_URL      - WebSocket URL (default: wss://rpi-4b.tail8711b.ts.net)
@@ -29,7 +29,7 @@ const RECONNECT_DELAY_MS = 5000;
 const CONNECT_TIMEOUT_MS = 10000;
 
 // Storage paths
-const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", "vins-bridge");
+const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", "openclaw-bridge");
 const IDENTITY_FILE = path.join(CONFIG_DIR, "device-identity.json");
 const TOKEN_FILE = path.join(CONFIG_DIR, "device-token.json");
 const PREFERENCES_FILE = path.join(CONFIG_DIR, "preferences.json");
@@ -309,20 +309,20 @@ export default function (pi: ExtensionAPI) {
     if (prev !== newState && currentCtx) {
       switch (newState) {
         case "connected":
-          currentCtx.ui.notify("Vins: connected", "success");
+          currentCtx.ui.notify("OpenClaw: connected", "success");
           if (pendingAutoWatchEnable && currentCtx) {
             void maybeApplyAutoWatch(currentCtx, "post-connect");
           }
           break;
         case "pairing_required":
-          currentCtx.ui.notify("Vins: pairing required, run /vins:pair", "warning");
+          currentCtx.ui.notify("OpenClaw: pairing required, run /openclaw:pair", "warning");
           break;
         case "error":
-          currentCtx.ui.notify(`Vins: error${error ? ` - ${error}` : ""}`, "error");
+          currentCtx.ui.notify(`OpenClaw: error${error ? ` - ${error}` : ""}`, "error");
           break;
         case "disconnected":
           if (prev === "connected") {
-            currentCtx.ui.notify("Vins: disconnected", "warning");
+            currentCtx.ui.notify("OpenClaw: disconnected", "warning");
           }
           break;
       }
@@ -506,7 +506,7 @@ export default function (pi: ExtensionAPI) {
           maxProtocol: PROTOCOL_VERSION,
           client: {
             id: "gateway-client",
-            displayName: "Pi Vins Bridge",
+            displayName: "Pi OpenClaw Bridge",
             version: "0.3.0",
             platform: process.platform,
             mode: "backend",
@@ -592,7 +592,7 @@ export default function (pi: ExtensionAPI) {
         const errorMsg = frame.error?.message || "Auth failed";
 
         if (errorMsg.toLowerCase().includes("pairing") || errorMsg.toLowerCase().includes("not_paired")) {
-          // If we were in "pairing" state (user ran /vins:pair), stay there awaiting approval
+          // If we were in "pairing" state (user ran /openclaw:pair), stay there awaiting approval
           // Otherwise go to pairing_required
           if (state.connectionState !== "pairing") {
             setState("pairing_required");
@@ -684,7 +684,7 @@ export default function (pi: ExtensionAPI) {
       await setWatchEnabled(sessionId, true, getProjectPath(ctx));
       autoWatchInitializedSessionId = sessionId;
       pendingAutoWatchEnable = false;
-      ctx.ui.notify(`VINS_WATCH | ALWAYS ON | auto-enabled (${reason}) | session ${sessionId}`, "info");
+      ctx.ui.notify(`OPENCLAW_WATCH | ALWAYS ON | auto-enabled (${reason}) | session ${sessionId}`, "info");
     } catch {
       pendingAutoWatchEnable = true;
     }
@@ -810,7 +810,7 @@ export default function (pi: ExtensionAPI) {
   // Commands
   // ============================================
 
-  pi.registerCommand("vins:pair", {
+  pi.registerCommand("openclaw:pair", {
     description: "Initiate device pairing with OpenClaw gateway",
     handler: async (_args, ctx) => {
       clearDeviceToken();
@@ -835,11 +835,11 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("vins:sync", {
-    description: "Force sync session to Vins (OpenClaw)",
+  pi.registerCommand("openclaw:sync", {
+    description: "Force sync session to OpenClaw",
     handler: async (_args, ctx) => {
       if (!isConfigured()) {
-        ctx.ui.notify("PAIRING_REQUIRED | run /vins:pair", "warning");
+        ctx.ui.notify("PAIRING_REQUIRED | run /openclaw:pair", "warning");
         return;
       }
 
@@ -851,7 +851,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("vins:watch", {
+  pi.registerCommand("openclaw:watch", {
     description: "Manage active watch for current Pi session: on | off | always | never | status",
     handler: async (args, ctx) => {
       const tokens = (typeof args === "string" ? args.trim().split(/\s+/).filter(Boolean) : []) as string[];
@@ -861,7 +861,7 @@ export default function (pi: ExtensionAPI) {
       currentCtx = ctx;
 
       if (!isConfigured()) {
-        ctx.ui.notify("PAIRING_REQUIRED | run /vins:pair", "warning");
+        ctx.ui.notify("PAIRING_REQUIRED | run /openclaw:pair", "warning");
         return;
       }
 
@@ -870,14 +870,14 @@ export default function (pi: ExtensionAPI) {
           await refreshWatchState(sessionId);
         }
         ctx.ui.notify(
-          `VINS_WATCH | always ${preferences.watchAlways ? "ON" : "OFF"} | session ${state.watchState.enabled ? "ON" : "OFF"} | ${sessionId}`,
+          `OPENCLAW_WATCH | always ${preferences.watchAlways ? "ON" : "OFF"} | session ${state.watchState.enabled ? "ON" : "OFF"} | ${sessionId}`,
           "info",
         );
         return;
       }
 
       if (!["on", "off", "always", "never"].includes(action)) {
-        ctx.ui.notify("Usage: /vins:watch on|off|always|never|status", "warning");
+        ctx.ui.notify("Usage: /openclaw:watch on|off|always|never|status", "warning");
         return;
       }
 
@@ -888,13 +888,13 @@ export default function (pi: ExtensionAPI) {
         if (state.connectionState !== "connected") {
           pendingAutoWatchEnable = true;
           connect();
-          ctx.ui.notify("VINS_WATCH | ALWAYS ON | preference saved, will enable after connect", "success");
+          ctx.ui.notify("OPENCLAW_WATCH | ALWAYS ON | preference saved, will enable after connect", "success");
           return;
         }
 
         await setWatchEnabled(sessionId, true, projectPath);
         autoWatchInitializedSessionId = sessionId;
-        ctx.ui.notify(`VINS_WATCH | ALWAYS ON | session ON | ${sessionId}`, "success");
+        ctx.ui.notify(`OPENCLAW_WATCH | ALWAYS ON | session ON | ${sessionId}`, "success");
         return;
       }
 
@@ -905,18 +905,18 @@ export default function (pi: ExtensionAPI) {
 
         if (state.connectionState !== "connected") {
           state.watchState = { enabled: false, sessionId };
-          ctx.ui.notify(`VINS_WATCH | ALWAYS OFF | session OFF | ${sessionId}`, "success");
+          ctx.ui.notify(`OPENCLAW_WATCH | ALWAYS OFF | session OFF | ${sessionId}`, "success");
           return;
         }
 
         await setWatchEnabled(sessionId, false, projectPath);
-        ctx.ui.notify(`VINS_WATCH | ALWAYS OFF | session OFF | ${sessionId}`, "success");
+        ctx.ui.notify(`OPENCLAW_WATCH | ALWAYS OFF | session OFF | ${sessionId}`, "success");
         return;
       }
 
       if (state.connectionState !== "connected") {
         connect();
-        ctx.ui.notify("VINS_WATCH | connecting to gateway", "warning");
+        ctx.ui.notify("OPENCLAW_WATCH | connecting to gateway", "warning");
         return;
       }
 
@@ -927,14 +927,14 @@ export default function (pi: ExtensionAPI) {
       }
 
       ctx.ui.notify(
-        `VINS_WATCH | always ${preferences.watchAlways ? "ON" : "OFF"} | session ${enabled ? "ON" : "OFF"} | ${sessionId}`,
+        `OPENCLAW_WATCH | always ${preferences.watchAlways ? "ON" : "OFF"} | session ${enabled ? "ON" : "OFF"} | ${sessionId}`,
         "success",
       );
     },
   });
 
-  pi.registerCommand("vins:status", {
-    description: "Show Vins bridge status",
+  pi.registerCommand("openclaw:status", {
+    description: "Show OpenClaw bridge status",
     handler: async (_args, ctx) => {
       const stateName = state.connectionState.toUpperCase();
       let details = "";
@@ -953,7 +953,7 @@ export default function (pi: ExtensionAPI) {
 
         case "pairing_required":
           details = `device ${shortDeviceId(identity.deviceId)}`;
-          hints = "run /vins:pair";
+          hints = "run /openclaw:pair";
           break;
 
         case "disconnected":

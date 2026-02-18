@@ -1,4 +1,4 @@
-# Vins Bridge - Pi ↔ OpenClaw Session Sync
+# OpenClaw Bridge - Pi ↔ OpenClaw Session Sync
 
 Sync your Pi coding sessions to OpenClaw for cross-context awareness.
 
@@ -6,10 +6,10 @@ Sync your Pi coding sessions to OpenClaw for cross-context awareness.
 
 - **Session mirroring** — Pi sessions are synced to OpenClaw workspace
 - **Secure device pairing** — Ed25519 keypair with gateway approval
-- **Active watch loop** — `/vins:watch on|off|status` controls server-side watch state per session
+- **Active watch loop** — `/openclaw:watch on|off|status` controls server-side watch state per session
 - **Event-driven continuation delivery** — queued follow-up messages are fetched on enqueue events, reconnect, and post-sync
 - **Gateway RPC extension** — OpenClaw is extended with custom `pi.session.*` methods
-- **On-demand access** — Zero tokens during sync, Vins reads when needed
+- **On-demand access** — Zero tokens during sync, OpenClaw reads when needed
 - **Auto-sync** — Syncs on `agent_start`/`agent_end` (debounced 2s) and forwards `agentState`
 
 ## Installation
@@ -91,7 +91,7 @@ export OPENCLAW_GATEWAY_PASSWORD="your-password"
 Start Pi and run:
 
 ```
-/vins:pair
+/openclaw:pair
 ```
 
 This generates an Ed25519 keypair and sends a pairing request to the gateway.
@@ -115,10 +115,10 @@ connections use this token automatically.
 
 | Command | Description |
 |---------|-------------|
-| `/vins:pair` | Initiate device pairing with gateway |
-| `/vins:sync` | Force sync current session |
-| `/vins:watch on\|off\|status` | Enable/disable/show active watch for current session |
-| `/vins:status` | Show connection, sync, and watch status |
+| `/openclaw:pair` | Initiate device pairing with gateway |
+| `/openclaw:sync` | Force sync current session |
+| `/openclaw:watch on\|off\|status` | Enable/disable/show active watch for current session |
+| `/openclaw:status` | Show connection, sync, and watch status |
 
 ## How It Works
 
@@ -170,7 +170,7 @@ OpenClaw side (default):
 
 **"NOT_PAIRED" error**
 
-Run `/vins:pair` and approve on gateway with `openclaw devices approve`.
+Run `/openclaw:pair` and approve on gateway with `openclaw devices approve`.
 
 **"Connection timeout"**
 
@@ -184,5 +184,5 @@ curl -I https://your-gateway.example.com
 Clear stored token and re-pair:
 ```bash
 rm ~/.pi/agent/extensions/openclaw-bridge/device-token.json
-pi /vins:pair
+pi /openclaw:pair
 ```
