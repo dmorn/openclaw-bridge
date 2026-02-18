@@ -19,7 +19,7 @@ Sync your Pi coding sessions to OpenClaw for cross-context awareness.
 pi install ./pi-extension
 
 # Or copy to extensions directory
-cp -r ./pi-extension ~/.pi/agent/extensions/vins-bridge
+cp -r ./pi-extension ~/.pi/agent/extensions/openclaw-bridge
 ```
 
 ## OpenClaw Side (Required)
@@ -27,7 +27,7 @@ cp -r ./pi-extension ~/.pi/agent/extensions/vins-bridge
 This project follows a **2-repo architecture**:
 
 1. Pi extension (this repo: `pi-extension/`) running inside Pi coding agent
-2. OpenClaw plugin (separate repo): `https://github.com/dmorn/vins-bridge-openclaw-plugin` (private)
+2. OpenClaw plugin (separate repo): `https://github.com/dmorn/pi-bridge` (private)
 
 The OpenClaw plugin must be installed separately in the OpenClaw environment.
 
@@ -46,7 +46,7 @@ The OpenClaw plugin registers these custom gateway methods:
 ### Install OpenClaw plugin
 
 ```bash
-openclaw plugins install /path/to/vins-bridge-openclaw-plugin
+openclaw plugins install /path/to/pi-bridge
 ```
 
 ### OpenClaw plugin config
@@ -146,7 +146,7 @@ Pi (silver)                    OpenClaw (rpi-4b)
 Pi side:
 
 ```
-~/.pi/agent/extensions/vins-bridge/
+~/.pi/agent/extensions/openclaw-bridge/
 ├── device-identity.json   # Ed25519 keypair (chmod 600)
 └── device-token.json      # Gateway-issued token (chmod 600)
 ```
@@ -183,6 +183,6 @@ curl -I https://your-gateway.example.com
 
 Clear stored token and re-pair:
 ```bash
-rm ~/.pi/agent/extensions/vins-bridge/device-token.json
+rm ~/.pi/agent/extensions/openclaw-bridge/device-token.json
 pi /vins:pair
 ```

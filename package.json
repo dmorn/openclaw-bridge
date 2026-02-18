@@ -1,18 +1,22 @@
 {
-  "name": "vins-bridge",
+  "name": "openclaw-bridge",
   "version": "1.0.0",
   "description": "Pi extension to sync sessions to OpenClaw gateway",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "author": "Daniel Morandini",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dmorn/vins-bridge.git"
+    "url": "git+https://github.com/dmorn/openclaw-bridge.git"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*"
   },
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": [
+      "./extensions"
+    ]
   }
 }
