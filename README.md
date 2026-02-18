@@ -1,115 +1,51 @@
-# OpenClaw Bridge - Pi ↔ OpenClaw Session Sync
+# openclaw-bridge
 
-Sync your Pi coding sessions to OpenClaw for cross-context awareness.
+Pi coding agent extension that syncs sessions to [OpenClaw](https://github.com/openclaw/openclaw) and receives continuation messages.
 
-## Features
+**Counterpart:** [pi-bridge](https://github.com/dmorn/pi-bridge) (OpenClaw gateway plugin)
 
-- **Session mirroring** — Pi sessions are synced to OpenClaw workspace
-- **Secure device pairing** — Ed25519 keypair with gateway approval
-- **Active watch loop** — `/openclaw:watch on|off|status` controls server-side watch state per session
-- **Event-driven continuation delivery** — queued follow-up messages are fetched on enqueue events, reconnect, and post-sync
-- **Gateway RPC extension** — OpenClaw is extended with custom `pi.session.*` methods
-- **On-demand access** — Zero tokens during sync, OpenClaw reads when needed
-- **Auto-sync** — Syncs on `agent_start`/`agent_end` (debounced 2s) and forwards `agentState`
+## What it does
 
-## Installation
+- **Syncs** Pi session entries to OpenClaw gateway via WebSocket RPC
+- **Watches** sessions for state changes with server-side notifications
+- **Receives** continuation messages from OpenClaw and injects them as user input
+
+## Install
 
 ```bash
-# Install from local path
-pi install ./pi-extension
-
-# Or copy to extensions directory
-cp -r ./pi-extension ~/.pi/agent/extensions/openclaw-bridge
+pi install git:github.com/dmorn/openclaw-bridge
 ```
-
-## OpenClaw Side (Required)
-
-This project follows a **2-repo architecture**:
-
-1. Pi extension (this repo: `pi-extension/`) running inside Pi coding agent
-2. OpenClaw plugin (separate repo): `https://github.com/dmorn/pi-bridge` (private)
-
-The OpenClaw plugin must be installed separately in the OpenClaw environment.
-
-### OpenClaw plugin methods
-
-The OpenClaw plugin registers these custom gateway methods:
-
-- `pi.session.sync` — append/write session entries to JSONL (accepts optional `agentState`)
-- `pi.session.list` — list synced Pi sessions
-- `pi.session.get` — read session entries with pagination (`offset`, `limit`)
-- `pi.session.delete` — delete a synced session
-- `pi.session.watch.set` / `pi.session.watch.get` — persist and inspect watch state
-- `pi.session.enqueue` — enqueue continuation messages for a Pi session
-- `pi.session.messages.fetch` / `pi.session.messages.ack` — fetch/ack continuation queue items
-
-### Install OpenClaw plugin
-
-```bash
-openclaw plugins install /path/to/pi-bridge
-```
-
-### OpenClaw plugin config
-
-In `openclaw.json`:
-
-```json
-{
-  "plugins": {
-    "entries": {
-      "pi-bridge": {
-        "enabled": true,
-        "config": {
-          "sessionsDir": "pi-sessions"
-        }
-      }
-    }
-  }
-}
-```
-
-`sessionsDir` is resolved relative to `agents.defaults.workspace`.
 
 ## Setup
 
-### 1. Set Gateway URL (optional if using default)
+### 1. Configure gateway URL
 
 ```bash
 export OPENCLAW_GATEWAY_URL="wss://your-gateway.example.com"
 ```
 
-Default: `wss://rpi-4b.tail8711b.ts.net`
+### 2. Pair the device
 
-### 2. Set Gateway Password (optional if using device token)
-
-```bash
-export OPENCLAW_GATEWAY_PASSWORD="your-password"
-```
-
-### 3. Pair the Device
-
-Start Pi and run:
-
+In Pi:
 ```
 /openclaw:pair
 ```
 
-This generates an Ed25519 keypair and sends a pairing request to the gateway.
-
-### 4. Approve on Gateway
-
-On your OpenClaw gateway host:
-
+On the OpenClaw gateway host:
 ```bash
-# List pending pairing requests
-openclaw devices list
-
-# Approve the request
-openclaw devices approve <requestId>
+openclaw devices list              # find the pending request
+openclaw devices approve <id>      # approve it
 ```
 
-After approval, the device receives a token that's stored locally. Future
-connections use this token automatically.
+Back in Pi, run `/openclaw:pair` again. The extension receives a device token and connects automatically. Token is stored locally — future connections are automatic.
+
+### 3. Enable watch (recommended)
+
+```
+/openclaw:watch always
+```
+
+This auto-enables watch on every new session, so OpenClaw gets notified when Pi finishes a task.
 
 ## Commands
 
@@ -117,72 +53,70 @@ connections use this token automatically.
 |---------|-------------|
 | `/openclaw:pair` | Initiate device pairing with gateway |
 | `/openclaw:sync` | Force sync current session |
-| `/openclaw:watch on\|off\|status` | Enable/disable/show active watch for current session |
-| `/openclaw:status` | Show connection, sync, and watch status |
+| `/openclaw:watch on\|off\|always\|never\|status` | Control session watch |
+| `/openclaw:status` | Show connection and sync status |
 
-## How It Works
+## How it works
 
-```
-Pi (silver)                    OpenClaw (rpi-4b)
-    │                               │
-    │── connect.challenge ──────────│
-    │                               │
-    │── connect (device identity) ──│
-    │                               │
-    │◄─ hello-ok (device token) ────│
-    │                               │
-    │── pi.session.sync ────────────│
-    │                               │
-    └───────────────────────────────┘
-```
-
-1. **Connect** — Pi sends Ed25519-signed device identity
-2. **Auth** — Gateway verifies signature and checks pairing
-3. **Token** — Gateway issues device-scoped token
-4. **Sync** — Pi pushes session deltas via RPC (no agent invocation)
-
-## Storage
-
-Pi side:
+### Session sync (Pi → OpenClaw)
 
 ```
-~/.pi/agent/extensions/openclaw-bridge/
-├── device-identity.json   # Ed25519 keypair (chmod 600)
-└── device-token.json      # Gateway-issued token (chmod 600)
+Pi                                 OpenClaw Gateway
+  │── connect (device identity) ─────│
+  │◄─ hello-ok (device token) ───────│
+  │                                   │
+  │── pi.session.sync ────────────────│──→ .jsonl + .meta.json
+  │   (on agent_start, agent_end)     │──→ watch transition → notification
+  └───────────────────────────────────┘
 ```
 
-OpenClaw side (default):
+Sync is **one-way** (Pi → OpenClaw) and **debounced** (2s). Sends `agentState` for watch detection.
+
+### Continuations (OpenClaw → Pi)
 
 ```
-<workspace>/pi-sessions/
-├── <sessionId>.jsonl      # synced entries
-└── <sessionId>.meta.json  # session metadata
+OpenClaw Gateway                   Pi
+  │── pi.session.continuation ───────│
+  │   (broadcast: sessionId+message) │──→ sendUserMessage(message)
+  │                                   │
+  │◄── pi.session.continuation.ack ──│
+  └───────────────────────────────────┘
 ```
+
+Direct delivery — no queue, no polling. If Pi is disconnected, the message is lost (by design — the user is back at the keyboard).
 
 ## Security
 
-- Device identity uses Ed25519 (same as OpenClaw native clients)
+- Ed25519 device identity (same as OpenClaw native clients)
 - Private key never leaves the device
-- Device tokens are scoped to role + permissions
-- Gateway admin can revoke tokens at any time
+- Device tokens are role-scoped (`operator` with `read`/`write`/`admin`)
+- Gateway admin can revoke tokens anytime
+
+## Storage
+
+```
+<extension-dir>/
+├── device-identity.json   # Ed25519 keypair (auto-generated)
+├── device-token.json      # Gateway-issued token (after pairing)
+└── preferences.json       # Watch preferences
+```
+
+All files are co-located with the extension and gitignored.
 
 ## Troubleshooting
 
-**"NOT_PAIRED" error**
+| Problem | Fix |
+|---------|-----|
+| `NOT_PAIRED` error | Run `/openclaw:pair`, approve on gateway |
+| Connection timeout | Check `OPENCLAW_GATEWAY_URL` and network |
+| Token revoked | Delete `device-token.json`, re-pair |
 
-Run `/openclaw:pair` and approve on gateway with `openclaw devices approve`.
+## OpenClaw side setup
 
-**"Connection timeout"**
+The gateway needs the [pi-bridge](https://github.com/dmorn/pi-bridge) plugin installed:
 
-Check gateway URL and network connectivity:
 ```bash
-curl -I https://your-gateway.example.com
+openclaw plugins install /path/to/pi-bridge
 ```
 
-**Token expired/revoked**
-
-Clear stored token and re-pair:
-```bash
-rm ~/.pi/agent/extensions/openclaw-bridge/device-token.json
-pi /openclaw:pair
-```
+See pi-bridge README for config details.
