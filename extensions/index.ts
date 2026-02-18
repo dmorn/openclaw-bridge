@@ -28,8 +28,8 @@ const SYNC_DEBOUNCE_MS = 2000;
 const RECONNECT_DELAY_MS = 5000;
 const CONNECT_TIMEOUT_MS = 10000;
 
-// Storage paths
-const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", "openclaw-bridge");
+// Storage paths — co-located with the extension itself
+const CONFIG_DIR = path.dirname(new URL(import.meta.url).pathname);
 const IDENTITY_FILE = path.join(CONFIG_DIR, "device-identity.json");
 const TOKEN_FILE = path.join(CONFIG_DIR, "device-token.json");
 const PREFERENCES_FILE = path.join(CONFIG_DIR, "preferences.json");

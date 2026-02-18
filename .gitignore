@@ -1,0 +1,4 @@
+# Extension runtime data (secrets)
+extensions/device-identity.json
+extensions/device-token.json
+extensions/preferences.json
