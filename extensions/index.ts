@@ -11,7 +11,7 @@
  *   /openclaw:watch   - Enable/disable active watch for current session
  *
  * Environment:
- *   OPENCLAW_GATEWAY_URL      - WebSocket URL (default: wss://rpi-4b.tail8711b.ts.net)
+ *   OPENCLAW_GATEWAY_URL      - WebSocket URL
  *   OPENCLAW_GATEWAY_PASSWORD - Gateway password for auth
  */
 
@@ -22,7 +22,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 
 // Configuration
-const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL || "wss://reform.tail8711b.ts.net";
+const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL;
 const GATEWAY_PASSWORD = process.env.OPENCLAW_GATEWAY_PASSWORD || "";
 const SYNC_DEBOUNCE_MS = 2000;
 const RECONNECT_DELAY_MS = 5000;
@@ -266,6 +266,11 @@ export default function (pi: ExtensionAPI) {
   let pendingSyncState: AgentState | undefined;
   let pendingAutoWatchEnable = false;
   let autoWatchInitializedSessionId: string | null = null;
+  let sessionDisabled = false;
+
+  if (!GATEWAY_URL) {
+    console.warn("[openclaw-bridge] OPENCLAW_GATEWAY_URL not set — bridge disabled. Set the env var and restart Pi.");
+  }
 
   const pendingRequests = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
@@ -330,7 +335,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function isConfigured(): boolean {
-    return Boolean(GATEWAY_PASSWORD || loadDeviceToken());
+    return Boolean(GATEWAY_URL && (GATEWAY_PASSWORD || loadDeviceToken()));
   }
 
   // ============================================
@@ -338,6 +343,10 @@ export default function (pi: ExtensionAPI) {
   // ============================================
 
   function connect(): void {
+    if (sessionDisabled) {
+      return;
+    }
+
     if (state.connectionState === "connecting" || state.connectionState === "connected") {
       return;
     }
@@ -356,7 +365,7 @@ export default function (pi: ExtensionAPI) {
     connectNonce = null;
 
     try {
-      ws = new WebSocket(GATEWAY_URL);
+      ws = new WebSocket(GATEWAY_URL!);
 
       ws.onopen = () => {
         // Connection established, waiting for challenge
@@ -758,6 +767,10 @@ export default function (pi: ExtensionAPI) {
       state.watchState = { enabled: false, sessionId: state.sessionId };
     }
 
+    if (sessionDisabled) {
+      return;
+    }
+
     if (isConfigured() && state.connectionState === "disconnected") {
       connect();
     }
@@ -771,6 +784,10 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_start", (_event, ctx) => {
     state.projectPath = getProjectPath(ctx);
+    if (sessionDisabled) {
+      return;
+    }
+
     void maybeApplyAutoWatch(ctx, "agent_start");
     if (isConfigured()) {
       scheduleSync(ctx, "running");
@@ -813,6 +830,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("openclaw:pair", {
     description: "Initiate device pairing with OpenClaw gateway",
     handler: async (_args, ctx) => {
+      sessionDisabled = false;
       clearDeviceToken();
       disconnect();
 
@@ -933,6 +951,16 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+
+  pi.registerCommand("openclaw:disable", {
+    description: "Disable OpenClaw bridge for this session",
+    handler: async (_args, ctx) => {
+      disconnect();
+      sessionDisabled = true;
+      ctx.ui.notify("OPENCLAW_BRIDGE | disabled for this session | use /openclaw:pair to re-enable", "warning");
+    },
+  });
+
   pi.registerCommand("openclaw:status", {
     description: "Show OpenClaw bridge status",
     handler: async (_args, ctx) => {
@@ -976,7 +1004,8 @@ export default function (pi: ExtensionAPI) {
         ? `watch ${state.watchState.enabled ? "ON" : "OFF"} (${state.watchState.sessionId})`
         : "watch OFF";
 
-      const parts = [stateName, details, watch, hints].filter(Boolean);
+      const disabled = sessionDisabled ? "DISABLED" : "";
+      const parts = [stateName, disabled, details, watch, hints].filter(Boolean);
       ctx.ui.notify(parts.join(" | "), state.connectionState === "error" ? "error" : "info");
     },
   });
