@@ -22,7 +22,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 
 // Configuration
-const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL || "wss://rpi-4b.tail8711b.ts.net";
+const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL || "wss://reform.tail8711b.ts.net";
 const GATEWAY_PASSWORD = process.env.OPENCLAW_GATEWAY_PASSWORD || "";
 const SYNC_DEBOUNCE_MS = 2000;
 const RECONNECT_DELAY_MS = 5000;
