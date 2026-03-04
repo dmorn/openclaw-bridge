@@ -102,6 +102,38 @@ function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function updateStatus(ctx: ExtensionContext, state: BridgeState): void {
+  const t = ctx.ui.theme;
+  let text: string;
+
+  switch (state.connectionState) {
+    case "connected": {
+      const watch = state.watchState.enabled ? t.fg("accent", " 👁") : "";
+      const entries = state.lastSyncedIndex > 0 ? t.fg("dim", ` ${state.lastSyncedIndex}e`) : "";
+      text = `${t.fg("success", "●")} OC${watch}${entries}`;
+      break;
+    }
+    case "connecting":
+      text = t.fg("dim", "○ OC…");
+      break;
+    case "pairing":
+      text = t.fg("warning", "⚠ OC pairing…");
+      break;
+    case "pairing_required":
+      text = t.fg("warning", "⚠ OC /pair");
+      break;
+    case "error": {
+      const err = (state.lastError ?? "err").slice(0, 16);
+      text = t.fg("error", `✕ OC ${err}`);
+      break;
+    }
+    default:
+      text = t.fg("muted", "─ OC");
+  }
+
+  ctx.ui.setStatus("openclaw", text);
+}
+
 // ============================================
 // Device Identity (Ed25519)
 // ============================================
@@ -296,6 +328,7 @@ export default function (pi: ExtensionAPI) {
         enabled: Boolean(payload?.enabled),
         sessionId,
       };
+      if (currentCtx) updateStatus(currentCtx, state);
     } catch {
       // Keep local state unchanged on transient errors
     }
@@ -310,25 +343,22 @@ export default function (pi: ExtensionAPI) {
     state.connectionState = newState;
     state.lastError = error ?? null;
 
-    // Notify on significant state changes
     if (prev !== newState && currentCtx) {
+      // Update footer status immediately
+      updateStatus(currentCtx, state);
+
+      // Notify only for events that require user action
       switch (newState) {
         case "connected":
-          currentCtx.ui.notify("OpenClaw: connected", "success");
-          if (pendingAutoWatchEnable && currentCtx) {
+          if (pendingAutoWatchEnable) {
             void maybeApplyAutoWatch(currentCtx, "post-connect");
           }
           break;
         case "pairing_required":
-          currentCtx.ui.notify("OpenClaw: pairing required, run /openclaw:pair", "warning");
+          currentCtx.ui.notify("OpenClaw: pairing required — run /openclaw:pair", "warning");
           break;
         case "error":
-          currentCtx.ui.notify(`OpenClaw: error${error ? ` - ${error}` : ""}`, "error");
-          break;
-        case "disconnected":
-          if (prev === "connected") {
-            currentCtx.ui.notify("OpenClaw: disconnected", "warning");
-          }
+          if (error) currentCtx.ui.notify(`OpenClaw error: ${error}`, "error");
           break;
       }
     }
@@ -677,6 +707,7 @@ export default function (pi: ExtensionAPI) {
   async function setWatchEnabled(sessionId: string, enabled: boolean, projectPath: string): Promise<void> {
     await sendRequest("pi.session.watch.set", { sessionId, enabled, projectPath });
     state.watchState = { enabled, sessionId };
+    if (currentCtx) updateStatus(currentCtx, state);
   }
 
   async function maybeApplyAutoWatch(ctx: ExtensionContext, reason: string): Promise<void> {
@@ -693,7 +724,7 @@ export default function (pi: ExtensionAPI) {
       await setWatchEnabled(sessionId, true, getProjectPath(ctx));
       autoWatchInitializedSessionId = sessionId;
       pendingAutoWatchEnable = false;
-      ctx.ui.notify(`OPENCLAW_WATCH | ALWAYS ON | auto-enabled (${reason}) | session ${sessionId}`, "info");
+      // Status bar already reflects watch ON — no extra notify needed
     } catch {
       pendingAutoWatchEnable = true;
     }
@@ -748,6 +779,8 @@ export default function (pi: ExtensionAPI) {
       state.lastSyncedIndex = entries.length;
       state.lastSyncAt = Date.now();
 
+      if (currentCtx) updateStatus(currentCtx, state);
+
     } catch {
       // swallow errors to keep sync/watch loop stable (non-fatal retry path)
     }
@@ -766,6 +799,8 @@ export default function (pi: ExtensionAPI) {
     if (state.watchState.sessionId !== state.sessionId) {
       state.watchState = { enabled: false, sessionId: state.sessionId };
     }
+
+    updateStatus(ctx, state);
 
     if (sessionDisabled) {
       return;
@@ -807,6 +842,7 @@ export default function (pi: ExtensionAPI) {
     autoWatchInitializedSessionId = null;
     state.lastSyncedIndex = 0;
 
+    updateStatus(ctx, state);
     void maybeApplyAutoWatch(ctx, "session_switch");
 
     if (isConfigured()) {
@@ -836,19 +872,18 @@ export default function (pi: ExtensionAPI) {
 
       setState("pairing");
 
-      ctx.ui.notify(`PAIRING | device ${shortDeviceId(identity.deviceId)}`, "info");
+      ctx.ui.notify(`Pairing initiated — device ${shortDeviceId(identity.deviceId)}\nApprove with: openclaw devices approve --latest`, "info");
 
       connect();
 
       await new Promise((r) => setTimeout(r, 5000));
 
       if (state.connectionState === "connected") {
-        ctx.ui.notify("PAIRED | connected", "success");
+        ctx.ui.notify("OpenClaw: paired and connected", "success");
       } else if (state.connectionState === "pairing") {
-        ctx.ui.notify("PAIRING | awaiting approval | openclaw devices list", "warning");
+        // Status bar already shows ⚠ OC pairing… — no extra notify needed
       } else {
         setState("pairing_required");
-        ctx.ui.notify(`PAIRING_REQUIRED | ${state.lastError || "failed"}`, "error");
       }
     },
   });
@@ -864,8 +899,6 @@ export default function (pi: ExtensionAPI) {
       currentCtx = ctx;
       state.lastSyncedIndex = 0;
       void doSync();
-
-      ctx.ui.notify("SYNC | triggered", "info");
     },
   });
 
@@ -886,11 +919,12 @@ export default function (pi: ExtensionAPI) {
       if (action === "status") {
         if (state.connectionState === "connected") {
           await refreshWatchState(sessionId);
+          updateStatus(ctx, state);
         }
-        ctx.ui.notify(
-          `OPENCLAW_WATCH | always ${preferences.watchAlways ? "ON" : "OFF"} | session ${state.watchState.enabled ? "ON" : "OFF"} | ${sessionId}`,
-          "info",
-        );
+        const watchAlways = preferences.watchAlways ? "always ON" : "always OFF";
+        const watchSession = state.watchState.enabled ? "session ON" : "session OFF";
+        const connStr = state.connectionState.toUpperCase();
+        ctx.ui.notify(`OC ${connStr} | ${watchAlways} | ${watchSession} | ${sessionId}`, "info");
         return;
       }
 
@@ -906,13 +940,13 @@ export default function (pi: ExtensionAPI) {
         if (state.connectionState !== "connected") {
           pendingAutoWatchEnable = true;
           connect();
-          ctx.ui.notify("OPENCLAW_WATCH | ALWAYS ON | preference saved, will enable after connect", "success");
+          ctx.ui.notify("Watch: always ON (will activate after connect)", "info");
           return;
         }
 
         await setWatchEnabled(sessionId, true, projectPath);
         autoWatchInitializedSessionId = sessionId;
-        ctx.ui.notify(`OPENCLAW_WATCH | ALWAYS ON | session ON | ${sessionId}`, "success");
+        ctx.ui.notify("Watch: always ON", "success");
         return;
       }
 
@@ -923,31 +957,25 @@ export default function (pi: ExtensionAPI) {
 
         if (state.connectionState !== "connected") {
           state.watchState = { enabled: false, sessionId };
-          ctx.ui.notify(`OPENCLAW_WATCH | ALWAYS OFF | session OFF | ${sessionId}`, "success");
+          updateStatus(ctx, state);
+          ctx.ui.notify("Watch: always OFF", "success");
           return;
         }
 
         await setWatchEnabled(sessionId, false, projectPath);
-        ctx.ui.notify(`OPENCLAW_WATCH | ALWAYS OFF | session OFF | ${sessionId}`, "success");
+        ctx.ui.notify("Watch: always OFF", "success");
         return;
       }
 
       if (state.connectionState !== "connected") {
         connect();
-        ctx.ui.notify("OPENCLAW_WATCH | connecting to gateway", "warning");
+        ctx.ui.notify("Connecting to gateway…", "info");
         return;
       }
 
       const enabled = action === "on";
       await setWatchEnabled(sessionId, enabled, projectPath);
-
-      if (enabled) {
-      }
-
-      ctx.ui.notify(
-        `OPENCLAW_WATCH | always ${preferences.watchAlways ? "ON" : "OFF"} | session ${enabled ? "ON" : "OFF"} | ${sessionId}`,
-        "success",
-      );
+      ctx.ui.notify(`Watch: ${enabled ? "ON" : "OFF"}`, "success");
     },
   });
 
@@ -957,56 +985,28 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       disconnect();
       sessionDisabled = true;
-      ctx.ui.notify("OPENCLAW_BRIDGE | disabled for this session | use /openclaw:pair to re-enable", "warning");
+      ctx.ui.setStatus("openclaw", ctx.ui.theme.fg("muted", "─ OC disabled"));
     },
   });
 
   pi.registerCommand("openclaw:status", {
     description: "Show OpenClaw bridge status",
     handler: async (_args, ctx) => {
-      const stateName = state.connectionState.toUpperCase();
-      let details = "";
-      let hints = "";
-
-      switch (state.connectionState) {
-        case "connected":
-          details = `${state.lastSyncedIndex} entries`;
-          hints = state.lastSyncAt ? `last sync ${formatTime(state.lastSyncAt)}` : "sync pending";
-          break;
-
-        case "pairing":
-          details = `device ${shortDeviceId(identity.deviceId)}`;
-          hints = "awaiting gateway approval";
-          break;
-
-        case "pairing_required":
-          details = `device ${shortDeviceId(identity.deviceId)}`;
-          hints = "run /openclaw:pair";
-          break;
-
-        case "disconnected":
-          details = "offline";
-          hints = "will reconnect";
-          break;
-
-        case "error":
-          details = state.lastError || "unknown error";
-          hints = "check gateway reachability";
-          break;
-
-        case "connecting":
-          details = "connecting";
-          hints = "please wait";
-          break;
+      if (state.connectionState === "connected" && state.sessionId) {
+        await refreshWatchState(state.sessionId);
+        updateStatus(ctx, state);
       }
 
-      const watch = state.watchState.sessionId
-        ? `watch ${state.watchState.enabled ? "ON" : "OFF"} (${state.watchState.sessionId})`
-        : "watch OFF";
+      const lines: string[] = [];
+      lines.push(`Connection: ${state.connectionState.toUpperCase()}${sessionDisabled ? " (disabled)" : ""}`);
+      lines.push(`Device: ${shortDeviceId(identity.deviceId)}`);
+      if (state.lastError) lines.push(`Error: ${state.lastError}`);
+      if (state.sessionId) lines.push(`Session: ${state.sessionId}`);
+      lines.push(`Watch always: ${preferences.watchAlways ? "ON" : "OFF"}`);
+      lines.push(`Watch session: ${state.watchState.enabled ? "ON" : "OFF"}`);
+      lines.push(`Synced: ${state.lastSyncedIndex} entries${state.lastSyncAt ? ` (last: ${formatTime(state.lastSyncAt)})` : ""}`);
 
-      const disabled = sessionDisabled ? "DISABLED" : "";
-      const parts = [stateName, disabled, details, watch, hints].filter(Boolean);
-      ctx.ui.notify(parts.join(" | "), state.connectionState === "error" ? "error" : "info");
+      ctx.ui.notify(lines.join("\n"), state.connectionState === "error" ? "error" : "info");
     },
   });
 }
