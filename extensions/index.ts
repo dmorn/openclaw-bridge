@@ -20,6 +20,23 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { fileURLToPath } from "node:url";
+
+// --- File logger (debug output goes here instead of notifications) ---
+const LOG_FILE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "bridge.log");
+const LOG_MAX_BYTES = 1_048_576; // 1 MB
+
+function logToFile(level: string, msg: string): void {
+  try {
+    // Rotate if over 1 MB
+    try {
+      const stat = fs.statSync(LOG_FILE);
+      if (stat.size > LOG_MAX_BYTES) fs.writeFileSync(LOG_FILE, "");
+    } catch { /* file may not exist yet */ }
+    const ts = new Date().toISOString();
+    fs.appendFileSync(LOG_FILE, `[${ts}] [${level}] ${msg}\n`);
+  } catch { /* never throw from logger */ }
+}
 
 // Configuration
 const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL;
@@ -301,7 +318,7 @@ export default function (pi: ExtensionAPI) {
   let sessionDisabled = false;
 
   if (!GATEWAY_URL) {
-    console.warn("[openclaw-bridge] OPENCLAW_GATEWAY_URL not set — bridge disabled. Set the env var and restart Pi.");
+    logToFile("WARN", "OPENCLAW_GATEWAY_URL not set — bridge disabled. Set the env var and restart Pi.");
   }
 
   const pendingRequests = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -358,7 +375,7 @@ export default function (pi: ExtensionAPI) {
           currentCtx.ui.notify("OpenClaw: pairing required — run /openclaw:pair", "warning");
           break;
         case "error":
-          if (error) currentCtx.ui.notify(`OpenClaw error: ${error}`, "error");
+          if (error) logToFile("ERROR", error);
           break;
       }
     }
