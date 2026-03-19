@@ -2,3 +2,7 @@
 extensions/device-identity.json
 extensions/device-token.json
 extensions/preferences.json
+
+# Dependencies
+node_modules/
+package-lock.json
